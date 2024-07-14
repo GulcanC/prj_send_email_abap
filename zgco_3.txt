@@ -1,0 +1,274 @@
+
+
+*&---------------------------------------------------------------------*
+*&  Include           ZGCO_3_TEST
+*&---------------------------------------------------------------------*
+
+* useful link => https://wiki.scn.sap.com/wiki/display/ABAP/Send+Emails+with+Attachments+of+any+Format
+
+*********************************** ADD A FOLDER FROM A DIRECTORY AND SEND IT VIA EMAIL
+
+PARAMETERS : "p_attach TYPE char200 OBLIGATORY,    " Select the Folder on the Desktop from F4 help
+
+  p_attach TYPE char200 OBLIGATORY,
+  p_email  TYPE char50 OBLIGATORY,       " Email ID
+  p_subj   TYPE char50 OBLIGATORY.
+" Subject of the Emaill
+DATA : t_hextab       TYPE TABLE OF string,
+       l_file         TYPE string,
+       t_mailhex      TYPE solix_tab,
+       lv_count       TYPE i,
+       gv_email       TYPE adr6-smtp_addr,
+       t_body         TYPE TABLE OF solisti1,
+       gr_recipient   TYPE REF TO if_recipient_bcs,
+       tl_textpool    TYPE TABLE OF textpool,
+       wa_textpool    LIKE LINE OF tl_textpool,
+       it_contents    TYPE soli_tab,
+       lv_attach_name TYPE sood-objdes,
+       l_subject      TYPE so_obj_des,
+       l_document     TYPE REF TO cl_document_bcs,
+       w_document     TYPE REF TO cl_bcs,
+       wa_contents    LIKE LINE OF it_contents,
+       lv_filename    TYPE string,
+       l_result       TYPE os_boolean,
+       lv_string      TYPE string.
+DATA : file_table LIKE TABLE OF sdokpath WITH HEADER LINE .
+DATA : dir_table LIKE TABLE OF sdokpath WITH HEADER LINE .
+DATA : file_count TYPE i,
+       dircount   TYPE i.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_attach.
+  CALL METHOD cl_gui_frontend_services=>directory_browse
+    CHANGING
+      selected_folder      = lv_string
+    EXCEPTIONS
+      cntl_error           = 1
+      error_no_gui         = 2
+      not_supported_by_gui = 3
+      OTHERS               = 4.
+  IF sy-subrc <> 0.
+    MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+  ELSE.
+     p_attach = lv_string.
+
+  ENDIF.
+
+START-OF-SELECTION.
+  " CHECK IF THE FOLDER PATH IS INITIAL, IF INITIAL LEAVE THE PROGRAM, ELSE COPY THE SUBJECT. ---> IT ALL DEPENDS ON HOW YOU VALIDATE.
+  IF p_attach IS INITIAL.
+    LEAVE LIST-PROCESSING.
+  ELSE.
+    l_subject = p_subj.
+  ENDIF.
+  " GETS ALL THE FILES NAMES IN THE SELECTED FOLDER
+  CALL FUNCTION 'TMP_GUI_DIRECTORY_LIST_FILES'
+    EXPORTING
+      directory  = p_attach
+    IMPORTING
+      file_count = file_count
+      dir_count  = dircount
+    TABLES
+      file_table = file_table
+      dir_table  = dir_table
+    EXCEPTIONS
+      cntl_error = 1
+      OTHERS     = 2.
+  " TELL HOW MANY FIELDS EXISTS
+  WRITE:/ 'no of files in the floder is : '(005), file_count.
+  SKIP 1.
+  WRITE:/ sy-uline.
+  WRITE:/ sy-uline.
+  " PROCESS THE DATA TO SEND MAIL WITH ATTACHMENT.
+  LOOP AT file_table.
+    lv_count = sy-tabix.
+    CONCATENATE p_attach '\' file_table INTO lv_filename.
+    MOVE lv_filename TO l_file.
+    CALL FUNCTION 'GUI_UPLOAD'
+      EXPORTING
+        filename                = l_file
+        filetype                = 'BIN'
+      TABLES
+        data_tab                = t_mailhex
+      EXCEPTIONS
+        file_open_error         = 1
+        file_read_error         = 2
+        no_batch                = 3
+        gui_refuse_filetransfer = 4
+        invalid_type            = 5
+        no_authority            = 6
+        unknown_error           = 7
+        bad_data_format         = 8
+        header_not_allowed      = 9
+        separator_not_allowed   = 10
+        header_too_long         = 11
+        unknown_dp_error        = 12
+        access_denied           = 13
+        dp_out_of_memory        = 14
+        disk_full               = 15
+        dp_timeout              = 16
+        OTHERS                  = 17.
+    IF sy-subrc <> 0.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+              WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+    ENDIF.
+    " YOU NEED TO MAINTAIN TEXT SYMBOLS AND WANT TO READ THEM IN THE PROGRAM
+    READ TEXTPOOL sy-repid INTO tl_textpool LANGUAGE sy-langu.
+    " MY TEXT SYMBOL IS " T04: You can Add your Body here"
+    READ TABLE tl_textpool INTO wa_textpool WITH KEY id = 'I'
+                                                     key = 'T04' BINARY SEARCH.
+    IF sy-subrc = 0.
+      wa_contents-line = wa_textpool-entry.
+      APPEND wa_contents TO it_contents.
+    ENDIF.
+    " CREATE THE DOCUMENT WITH CONTENTS
+    CREATE OBJECT l_document.
+    l_document = cl_document_bcs=>create_document(
+        i_type       = 'HTM'
+        i_subject    = l_subject
+        i_length     = '1000'
+        i_language   = sy-langu
+        i_importance = '1'
+        i_text       = it_contents ).
+    " ATTACH THE FILE, THE ATTACHMENT TYPE SHOULD BE BIN TO ACCEPT ANY KIND OF ATTACHMENT, INCLUDING VIDEOS, AUDIO FILES ETC...
+    lv_attach_name = file_table.
+    CALL METHOD l_document->add_attachment
+      EXPORTING
+        i_attachment_type    = 'BIN'
+        i_attachment_subject = lv_attach_name
+        i_att_content_hex    = t_mailhex.
+    " CREATING PERSISTENT OBJECT WILL ALLOW YOU TO SET THE DOCUMENT IN THE MAIL
+    w_document = cl_bcs=>create_persistent( ).
+    CALL METHOD w_document->set_document( l_document ).
+    " EMAIL AS GIVEN IN THE SELECTION SCREEN.
+    gv_email = p_email.
+    gr_recipient = cl_cam_address_bcs=>create_internet_address( gv_email ).
+    "Add recipient to send request
+    CALL METHOD w_document->add_recipient
+      EXPORTING
+        i_recipient = gr_recipient
+        i_express   = 'X'.
+    " SEND THE MAIL
+    CALL METHOD w_document->send(
+      EXPORTING
+        i_with_error_screen = 'X'
+      RECEIVING
+        result              = l_result ).
+    " YOU CAN VERIFY THE STATUS IN THE LIST, YOU CAN ALSO SUBMIT THIS AS A BACKGROUND JOB.
+    IF l_result = 'X'.
+      WRITE :/ , 1(9) lv_count, 10(55) file_table-pathname.
+      WRITE : 56(1) '-', 58(20) 'Mail sent'(003).
+      COMMIT WORK.
+    ELSE.
+      WRITE :/ , 1(9) lv_count, 10(55) file_table-pathname.
+      WRITE : 56(1) '-', 58(30) 'Error in sending Mail'(004).
+      ROLLBACK WORK.
+    ENDIF.
+    REFRESH it_contents[].
+  ENDLOOP.
+
+
+
+
+** declaration of variables
+*
+*    DATA : lv_sender    TYPE uname,
+*           lv_recipient TYPE ad_smtpadr, "char 241
+*           lv_subject   TYPE string,
+*           lv_message   TYPE string.
+*
+** set the sender
+*
+*    lv_sender = 'GCO'.
+*    lv_recipient = 'gulcancoskun.a@gmail.com'.
+*    lv_subject = 'SAP send email test'.
+*    lv_message = 'This is my email test'.
+*
+** convert our email text to internal table
+** our message will be divided into parts.
+*
+*
+*    DATA(it_body_txt) = cl_document_bcs=>string_to_soli( ip_string = lv_message ).
+*
+*
+*TRY .
+** next we create the doucemnt
+** create document object, write parameters (i_type, )
+** so_obj_des is a function module that is used to split a long string to a multiple lines
+** cl_document_bcs is a class that is used for working with business comunication service(BCS)
+** BCS provides some functionalities like sending email, fax, message documents
+*
+*    DATA(o_document) = cl_document_bcs=>create_document( i_type = 'HTM'
+*                                                         i_text = it_body_txt
+*                                                         i_subject = CONV so_obj_des( lv_subject ) ).
+*
+** create send request
+** the CL_BCS class is used for sending persistent email messages.
+** Persistent email messages are stored in the SAP system and can be reprocessed in case of failures or if they need to be resent.
+*
+*    DATA(o_send_request) = cl_bcs=>create_persistent( ).
+*    o_send_request->set_message_subject( IP_subject = lv_subject ).
+*    o_send_request->set_document( o_document ).
+*
+** create sender object
+** the CL_SAPUSER class provides methods to retrieve user information, validate user credentials,
+** and perform user-related tasks such as changing passwords, checking user authorization, and more.
+*
+*    DATA(o_sender) = cl_sapuser_bcs=>create( lv_sender ).
+*    o_send_request->set_sender( o_sender ).
+*
+** set recipient, create a recipient object, set parameters i_express, ..
+*
+*    DATA(o_recipient) = cl_cam_address_bcs=>create_internet_address( lv_recipient ).
+*    o_send_request->add_recipient( i_recipient = o_recipient
+*                                    i_express = abap_true ).
+*
+** we set another method to send email immidiatly
+*
+*    o_send_request->set_send_immediately( abap_true ).
+*
+** send document email
+*
+*    o_send_request->send( i_with_error_screen = abap_true ).
+*
+*    COMMIT WORK.
+*
+*    IF sy-subrc = 0.
+*      WRITE : / 'Email has been sent!'.
+*    ENDIF.
+*
+*  CATCH cx_root INTO DATA(e_text).
+*      WRITE : / e_text->get_text( ).
+*ENDTRY.
+
+DATA: BEGIN OF it_final OCCURS 0,
+      matnr(10) TYPE c,
+      werks(10) TYPE c,
+      usage(10) TYPE c,
+      data(08) TYPE c,
+      END OF it_final.
+
+DATA wa_it_final LIKE LINE OF it_final.
+DATA: v_excel_string(2000) TYPE c,
+      v_file LIKE v_excel_string VALUE
+      'C:\usr\sap\put\files.txt',
+      delimiter TYPE c VALUE ' '.
+
+
+  OPEN DATASET v_file FOR INPUT IN TEXT MODE ENCODING DEFAULT.
+  IF sy-subrc NE 0.
+write:/ 'error opening file'.
+  ELSE.
+    WHILE ( sy-subrc EQ 0 ).
+      READ DATASET v_file INTO wa_it_final.
+      IF NOT wa_it_final IS INITIAL.
+        APPEND wa_it_final TO it_final.
+      ENDIF.
+      CLEAR wa_it_final.
+    ENDWHILE.
+  ENDIF.
+CLOSE DATASET v_file.
+
+LOOP AT IT_FINAL.
+WRITE:/ IT_FINAL-MATNR, IT_FINAL-WERKS, IT_FINAL-USAGE,  IT_FINAL-DATA.
+ENDLOOP.
